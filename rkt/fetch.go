@@ -6,7 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/coreos/rocket/app-container/discovery"
+	"github.com/appc/spec/discovery"
+	"github.com/appc/spec/schema/types"
 	"github.com/coreos/rocket/cas"
 )
 
@@ -22,6 +23,10 @@ var (
 		Run:     runFetch,
 	}
 )
+
+func init() {
+	commands = append(commands, cmdFetch)
+}
 
 func fetchURL(img string, ds *cas.Store) (string, error) {
 	rem := cas.NewRemote(img, []string{})
@@ -87,7 +92,8 @@ func runFetch(args []string) (exit int) {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			return 1
 		}
-		fmt.Println(hash)
+		shortHash := types.ShortHash(hash)
+		fmt.Println(shortHash)
 	}
 
 	return

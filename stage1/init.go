@@ -1,9 +1,12 @@
+//+build linux
+
 package main
 
 // this implements /init of stage1/nspawn+systemd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -18,6 +21,34 @@ const (
 	interpBin = "/usr/lib/ld-linux-x86-64.so.2"
 )
 
+// mirrorLocalZoneInfo tries to reproduce the /etc/localtime target in stage1/ to satisfy systemd-nspawn
+func mirrorLocalZoneInfo(root string) {
+	zif, err := os.Readlink("/etc/localtime")
+	if err != nil {
+		return
+	}
+
+	src, err := os.Open(zif)
+	if err != nil {
+		return
+	}
+	defer src.Close()
+
+	destp := filepath.Join(path.Stage1RootfsPath(root), zif)
+
+	if err = os.MkdirAll(filepath.Dir(destp), 0755); err != nil {
+		return
+	}
+
+	dest, err := os.OpenFile(destp, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer dest.Close()
+
+	_, _ = io.Copy(dest, src)
+}
+
 func main() {
 	root := "."
 	debug := len(os.Args) > 1 && os.Args[1] == "debug"
@@ -27,6 +58,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Failed to load container: %v\n", err)
 		os.Exit(1)
 	}
+
+	mirrorLocalZoneInfo(c.Root)
 
 	if err = c.ContainerToSystemd(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to configure systemd: %v\n", err)

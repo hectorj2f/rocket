@@ -2,9 +2,9 @@
 
 [![Build Status](https://travis-ci.org/coreos/rocket.png?branch=master)](https://travis-ci.org/coreos/rocket)
 
-_Release early, release often: Rocket is currently a prototype and we are seeking your feedback via pull requests_
+_Release early, release often: Rocket is currently a prototype and we are seeking your feedback via issues and pull requests_
 
-Rocket is a cli for running App Containers. The goal of rocket is to be composable, secure, and fast.
+Rocket is a CLI for running App Containers. The goal of rocket is to be composable, secure, and fast.
 
 [Read more about Rocket in the launch announcement](https://coreos.com/blog/rocket).
 
@@ -14,16 +14,16 @@ Rocket is a cli for running App Containers. The goal of rocket is to be composab
 
 `rkt` is currently supported on amd64 Linux. We recommend booting up a fresh virtual machine to test out rocket.
 
-To install the `rkt` binary:
+To install the `rkt` binary, grab the release directly from GitHub:
 
 ```
-curl -L https://github.com/coreos/rocket/releases/download/v0.1.0/rocket-v0.1.0.tar.gz -o rocket-v0.1.0.tar.gz
-tar xzvf rocket-v0.1.0.tar.gz
-cd rocket-v0.1.0
+wget https://github.com/coreos/rocket/releases/download/v0.1.1/rocket-v0.1.1.tar.gz
+tar xzvf rocket-v0.1.1.tar.gz
+cd rocket-v0.1.1
 ./rkt help
 ```
 
-Keep in mind while running through the examples that rkt needs to be run as root for most operations.
+Keep in mind while running through the examples that right now `rkt` needs to be run as root for most operations.
 
 ## Rocket basics
 
@@ -32,72 +32,73 @@ Keep in mind while running through the examples that rkt needs to be run as root
 Rocket uses content addressable storage (CAS) for storing an ACI on disk. In this example, the image is downloaded and added to the CAS.
 
 ```
-$ rkt fetch https://github.com/coreos/etcd/releases/download/v0.5.0-alpha.4/etcd-v0.5.0-alpha.4-linux-amd64.aci
-sha256-701c24b2d275f0e291b807a464ae2390bcd8d7c5b4f2d7e47e6fd917cd5e5588
+[~/rocket-v0.1.1]$ sudo ./rkt fetch https://github.com/coreos/etcd/releases/download/v0.5.0-alpha.4/etcd-v0.5.0-alpha.4-linux-amd64.aci
+sha512-0c45e8c0ab2b3cdb9ec6649073d5c6c43f4f1ed9ebd97b2ebfc2290c21ee88ae
 ```
 
 These files are now written to disk:
 
 ```
-$ find /var/lib/rkt/cas/blob/
+[~]$ find /var/lib/rkt/cas/blob/
 /var/lib/rkt/cas/blob/
-/var/lib/rkt/cas/blob/sha256
-/var/lib/rkt/cas/blob/sha256/70
-/var/lib/rkt/cas/blob/sha256/70/sha256-701c24b2d275f0e291b807a464ae2390bcd8d7c5b4f2d7e47e6fd917cd5e5588
+/var/lib/rkt/cas/blob/sha512
+/var/lib/rkt/cas/blob/sha512/0c
+/var/lib/rkt/cas/blob/sha512/0c/sha512-0c45e8c0ab2b3cdb9ec6649073d5c6c43f4f1ed9ebd97b2ebfc2290c21ee88ae63bff32c23690f7c96b666ffc353f38c3f2977c4f019176b12c74f9683e91141
 ```
 
-Per the App Container [spec](app-container/SPEC.md#image-archives) the SHA-256 is of the tarball, which is reproducible with other tools:
+Per the [App Container Specification](https://github.com/appc/spec/blob/master/SPEC.md#image-archives), the SHA-512 hash is of the tarball and can be reproduced with other tools:
 
 ```
-$ wget https://github.com/coreos/etcd/releases/download/v0.5.0-alpha.4/etcd-v0.5.0-alpha.4-linux-amd64.aci
+[~]$ wget https://github.com/coreos/etcd/releases/download/v0.5.0-alpha.4/etcd-v0.5.0-alpha.4-linux-amd64.aci
 ...
-$ gzip -dc etcd-v0.5.0-alpha.4-linux-amd64.aci > etcd-v0.5.0-alpha.4-linux-amd64.tar
-$ sha256sum etcd-v0.5.0-alpha.4-linux-amd64.tar
-701c24b2d275f0e291b807a464ae2390bcd8d7c5b4f2d7e47e6fd917cd5e5588  etcd-v0.5.0-alpha.4-linux-amd64.tar
+[~]$ gzip -dc etcd-v0.5.0-alpha.4-linux-amd64.aci > etcd-v0.5.0-alpha.4-linux-amd64.tar
+[~]$ sha512sum etcd-v0.5.0-alpha.4-linux-amd64.tar
+d2e68c48db4302affefd90dce8a4e74eef001cd1ea5daf91163e6f549650b2df  etcd-v0.5.0-alpha.4-linux-amd64.tar
 ```
 
 ### Launching an ACI
 
-To run an ACI, you can either use the SHA-256 hash, or the URL which you downloaded it from:
+An ACI can be run by pointing `rkt` at either the ACI's hash or URL.
 
 ```
-$ rkt run https://github.com/coreos/etcd/releases/download/v0.5.0-alpha.4/etcd-v0.5.0-alpha.4-linux-amd64.aci
-Press ^] three times to kill container.
+# Example of running via ACI hash
+[~/rocket-v0.1.1]$ sudo ./rkt run sha256-6635e9cbe18c6f51e8c70c143948df111b5626db39198182fbeb9277beb606db
+...
+Press ^] three times to kill container
 ```
 
-rkt will do the appropriate ETag checking on the URL to make sure it has the most up to date version of the image.
-
-Or, you can explicitly choose an image to run based on the SHA-256:
-
 ```
-$ rkt run sha256-701c24b2d275f0e291b807a464ae2390bcd8d7c5b4f2d7e47e6fd917cd5e5588
-Press ^] three times to kill container.
+# Example of running via ACI URL
+[~/rocket-v0.1.1]$ sudo ./rkt run https://github.com/coreos/etcd/releases/download/v0.5.0-alpha.4/etcd-v0.5.0-alpha.4-linux-amd64.aci
+...
+Press ^] three times to kill container
 ```
 
-These commands are interchangeable.
+`rkt` will do the appropriate ETag checking on the URL to make sure it has the most up to date version of the image.
 
-The escape character ```^]``` is generated by ```Ctrl-]``` on a US keyboard, on other keyboard layouts that will differ (for example the Swedish keyboard layout where ```Ctrl-å``` on OS X or ```Ctrl-^``` on Windows will generate the correct escape character).
-
+The escape character ```^]``` is generated by ```Ctrl-]``` on a US keyboard. The required key combination will differ on other keyboard layouts. For example, the Swedish keyboard layout uses ```Ctrl-å``` on OS X and ```Ctrl-^``` on Windows to generate the ```^]``` escape character.
 
 ## App Container basics
 
-[App Container](app-container) is a [specification](app-container/SPEC.md) of an image format, runtime, and discovery protocol for running a container. We anticipate app container to be adopted by other runtimes outside of Rocket itself. Read more about it [here](app-container).
+[App Container][appc-repo] is a [specification][appc-spec] of an image format, runtime, and discovery protocol for running a container. We anticipate app container will be adopted by other runtimes outside of Rocket itself. Read more about it [here][appc-repo].
 
-To validate the `rkt` with the App Container [validation ACIs](app-container/README.md) run:
+To validate the `rkt` with the App Container [validation ACIs][appc-readme] run:
 
 ```
-$ rkt run -volume database:/tmp \
-	https://github.com/coreos/rocket/releases/download/v0.1.0/ace-validator-main.aci \
-	https://github.com/coreos/rocket/releases/download/v0.1.0/ace-validator-sidekick.aci
+[~/rocket-v0.1.1]$ sudo ./rkt run -volume database:/tmp \
+	https://github.com/appc/spec/releases/download/v0.1.1/ace-validator-main.aci \
+	https://github.com/appc/spec/releases/download/v0.1.1/ace-validator-sidekick.aci
 ```
+
+[appc-repo]: https://github.com/appc/spec/
+[appc-spec]: https://github.com/appc/spec/blob/master/SPEC.md
+[appc-readme]: https://github.com/appc/spec/blob/master/README.md
 
 ## Rocket internals
 
 Rocket is designed to be modular and pluggable by default. To do this we have a concept of "stages" of execution of the container.
 
-Execution with Rocket is divided into a number of distinct stages. The
-motivation for this is to separate the concerns of initial filesystem setup,
-execution environment, and finally the execution of the apps themselves.
+Execution with Rocket is divided into a number of distinct stages. The motivation for this is to separate the concerns of initial filesystem setup, execution environment, and finally the execution of the apps themselves.
 
 ### Stage 0
 
@@ -113,9 +114,9 @@ The first step of the process, stage 0, is the actual `rkt` binary itself. This 
 Given a run command such as:
 
 ```
-rkt run --volume bind:/opt/tenant1/database \
-	sha256-8a30f14877cd8065939e3912542a17d1a5fd9b4c \
-	sha256-abcd29837d89389s9d0898ds908ds890df890908
+[~/rocket-v0.1.1]$ sudo ./rkt run --volume bind:/opt/tenant1/database \
+	sha512-8a30f14877cd8065939e3912542a17d1a5fd9b4c \
+	sha512-abcd29837d89389s9d0898ds908ds890df890908
 ```
 
 a container manifest compliant with the ACE spec will be generated, and the filesystem created by stage0 should be:
@@ -125,8 +126,8 @@ a container manifest compliant with the ACE spec will be generated, and the file
 /stage1
 /stage1/init
 /stage1/opt
-/stage1/opt/stage2/sha256-8a30f14877cd8065939e3912542a17d1a5fd9b4c
-/stage1/opt/stage2/sha256-abcd29837d89389s9d0898ds908ds890df890908
+/stage1/opt/stage2/sha512-648db489d57363b29f1597d4312b212928a48e9a7ee2baec7a237629cce5a6744632d047708c9486dec6b105b8a2d298b622daa5654c1b21af36bfc9534417d7
+/stage1/opt/stage2/sha512-0c45e8c0ab2b3cdb9ec6649073d5c6c43f4f1ed9ebd97b2ebfc2290c21ee88ae63bff32c23690f7c96b666ffc353f38c3f2977c4f019176b12c74f9683e91141
 ```
 
 where:

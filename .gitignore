@@ -2,4 +2,6 @@ bin/
 gopath/
 stage0/stage1_init/
 stage0/stage1_rootfs/
-*/*.swp
+stage1/cache/
+*.sw[ponm]
+.DS_Store

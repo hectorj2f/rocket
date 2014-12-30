@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"text/tabwriter"
 )
 
@@ -17,7 +18,7 @@ const (
 var (
 	globalFlagset = flag.NewFlagSet(cliName, flag.ExitOnError)
 	out           *tabwriter.Writer
-	commands      []*Command
+	commands      []*Command // Commands should register themselves by appending
 	globalFlags   = struct {
 		Dir   string
 		Debug bool
@@ -45,13 +46,6 @@ type Command struct {
 func init() {
 	out = new(tabwriter.Writer)
 	out.Init(os.Stdout, 0, 8, 1, '\t', 0)
-	commands = []*Command{
-		cmdHelp,
-		cmdFetch,
-		cmdStatus,
-		cmdRun,
-		cmdVersion,
-	}
 }
 
 func main() {
@@ -94,4 +88,12 @@ func getFlags(flagset *flag.FlagSet) (flags []*flag.Flag) {
 		flags = append(flags, f)
 	})
 	return
+}
+
+func containersDir() string {
+	return filepath.Join(globalFlags.Dir, "containers")
+}
+
+func garbageDir() string {
+	return filepath.Join(globalFlags.Dir, "garbage")
 }

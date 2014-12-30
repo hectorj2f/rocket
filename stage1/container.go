@@ -1,3 +1,5 @@
+//+build linux
+
 package main
 
 import (
@@ -10,17 +12,17 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/appc/spec/schema"
+	"github.com/appc/spec/schema/types"
 	"github.com/coreos/rocket/Godeps/_workspace/src/github.com/coreos/go-systemd/unit"
-	"github.com/coreos/rocket/app-container/schema"
-	"github.com/coreos/rocket/app-container/schema/types"
 	rktpath "github.com/coreos/rocket/path"
 )
 
-// Container encapsulates a ContainerRuntimeManifest and AppManifests
+// Container encapsulates a ContainerRuntimeManifest and ImageManifests
 type Container struct {
 	Root     string // root directory where the container will be located
 	Manifest *schema.ContainerRuntimeManifest
-	Apps     map[string]*schema.AppManifest
+	Apps     map[string]*schema.ImageManifest
 }
 
 // LoadContainer loads a Container Runtime Manifest (as prepared by stage0) and
@@ -28,7 +30,7 @@ type Container struct {
 func LoadContainer(root string) (*Container, error) {
 	c := &Container{
 		Root: root,
-		Apps: make(map[string]*schema.AppManifest),
+		Apps: make(map[string]*schema.ImageManifest),
 	}
 
 	buf, err := ioutil.ReadFile(rktpath.ContainerManifestPath(c.Root))
@@ -43,13 +45,13 @@ func LoadContainer(root string) (*Container, error) {
 	c.Manifest = cm
 
 	for _, app := range c.Manifest.Apps {
-		ampath := rktpath.AppManifestPath(c.Root, app.ImageID)
+		ampath := rktpath.ImageManifestPath(c.Root, app.ImageID)
 		buf, err := ioutil.ReadFile(ampath)
 		if err != nil {
 			return nil, fmt.Errorf("failed reading app manifest %q: %v", ampath, err)
 		}
 
-		am := &schema.AppManifest{}
+		am := &schema.ImageManifest{}
 		if err = json.Unmarshal(buf, am); err != nil {
 			return nil, fmt.Errorf("failed unmarshalling app manifest %q: %v", ampath, err)
 		}
@@ -63,10 +65,11 @@ func LoadContainer(root string) (*Container, error) {
 	return c, nil
 }
 
-// appToSystemd transforms the provided app manifest into a systemd service unit
-func (c *Container) appToSystemd(am *schema.AppManifest, id types.Hash) error {
+// appToSystemd transforms the provided app manifest into systemd units
+func (c *Container) appToSystemd(am *schema.ImageManifest, id types.Hash) error {
 	name := am.Name.String()
-	execStart := strings.Join(am.Exec, " ")
+	app := am.App
+	execStart := strings.Join(app.Exec, " ")
 	opts := []*unit.UnitOption{
 		&unit.UnitOption{"Unit", "Description", name},
 		&unit.UnitOption{"Unit", "DefaultDependencies", "false"},
@@ -76,11 +79,11 @@ func (c *Container) appToSystemd(am *schema.AppManifest, id types.Hash) error {
 		&unit.UnitOption{"Service", "Restart", "no"},
 		&unit.UnitOption{"Service", "RootDirectory", rktpath.RelAppRootfsPath(id)},
 		&unit.UnitOption{"Service", "ExecStart", execStart},
-		&unit.UnitOption{"Service", "User", am.User},
-		&unit.UnitOption{"Service", "Group", am.Group},
+		&unit.UnitOption{"Service", "User", app.User},
+		&unit.UnitOption{"Service", "Group", app.Group},
 	}
 
-	for _, eh := range am.EventHandlers {
+	for _, eh := range app.EventHandlers {
 		var typ string
 		switch eh.Name {
 		case "pre-start":
@@ -94,24 +97,69 @@ func (c *Container) appToSystemd(am *schema.AppManifest, id types.Hash) error {
 		opts = append(opts, &unit.UnitOption{"Service", typ, exec})
 	}
 
-	env := am.Environment
+	env := app.Environment
 	env["AC_APP_NAME"] = name
 	for ek, ev := range env {
 		ee := fmt.Sprintf(`"%s=%s"`, ek, ev)
 		opts = append(opts, &unit.UnitOption{"Service", "Environment", ee})
 	}
 
-	file, err := os.OpenFile(ServiceFilePath(c.Root, id), os.O_WRONLY|os.O_CREATE, 0644)
+	saPorts := []types.Port{}
+	for _, p := range app.Ports {
+		if p.SocketActivated {
+			saPorts = append(saPorts, p)
+		}
+	}
+
+	if len(saPorts) > 0 {
+		sockopts := []*unit.UnitOption{
+			&unit.UnitOption{"Unit", "Description", name + " socket-activated ports"},
+			&unit.UnitOption{"Unit", "DefaultDependencies", "false"},
+			&unit.UnitOption{"Socket", "BindIPv6Only", "both"},
+			&unit.UnitOption{"Socket", "Service", ServiceUnitName(id)},
+		}
+
+		for _, sap := range saPorts {
+			var proto string
+			switch sap.Protocol {
+			case "tcp":
+				proto = "ListenStream"
+			case "udp":
+				proto = "ListenDatagram"
+			default:
+				return fmt.Errorf("unrecognized protocol: %v", sap.Protocol)
+			}
+			sockopts = append(sockopts, &unit.UnitOption{"Socket", proto, fmt.Sprintf("%v", sap.Port)})
+		}
+
+		file, err := os.OpenFile(SocketUnitPath(c.Root, id), os.O_WRONLY|os.O_CREATE, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to create socket file: %v", err)
+		}
+		defer file.Close()
+
+		if _, err = io.Copy(file, unit.Serialize(sockopts)); err != nil {
+			return fmt.Errorf("failed to write socket unit file: %v", err)
+		}
+
+		if err = os.Symlink(path.Join("..", SocketUnitName(id)), SocketWantPath(c.Root, id)); err != nil {
+			return fmt.Errorf("failed to link socket want: %v", err)
+		}
+
+		opts = append(opts, &unit.UnitOption{"Unit", "Requires", SocketUnitName(id)})
+	}
+
+	file, err := os.OpenFile(ServiceUnitPath(c.Root, id), os.O_WRONLY|os.O_CREATE, 0644)
 	if err != nil {
-		return fmt.Errorf("failed to create service file: %v", err)
+		return fmt.Errorf("failed to create service unit file: %v", err)
 	}
 	defer file.Close()
 
 	if _, err = io.Copy(file, unit.Serialize(opts)); err != nil {
-		return fmt.Errorf("failed to write service file: %v", err)
+		return fmt.Errorf("failed to write service unit file: %v", err)
 	}
 
-	if err = os.Symlink(path.Join("..", ServiceName(id)), WantLinkPath(c.Root, id)); err != nil {
+	if err = os.Symlink(path.Join("..", ServiceUnitName(id)), ServiceWantPath(c.Root, id)); err != nil {
 		return fmt.Errorf("failed to link service want: %v", err)
 	}
 
@@ -121,12 +169,6 @@ func (c *Container) appToSystemd(am *schema.AppManifest, id types.Hash) error {
 // ContainerToSystemd creates the appropriate systemd service unit files for
 // all the constituent apps of the Container
 func (c *Container) ContainerToSystemd() error {
-	if err := os.MkdirAll(ServicesPath(c.Root), 0640); err != nil {
-		return fmt.Errorf("failed to create services directory: %v", err)
-	}
-	if err := os.MkdirAll(WantsPath(c.Root), 0640); err != nil {
-		return fmt.Errorf("failed to create wants directory: %v", err)
-	}
 	for _, am := range c.Apps {
 		a := c.Manifest.Apps.Get(am.Name)
 		if a == nil {
@@ -143,7 +185,7 @@ func (c *Container) ContainerToSystemd() error {
 
 // appToNspawnArgs transforms the given app manifest, with the given associated
 // app image id, into a subset of applicable systemd-nspawn argument
-func (c *Container) appToNspawnArgs(am *schema.AppManifest, id types.Hash) ([]string, error) {
+func (c *Container) appToNspawnArgs(am *schema.ImageManifest, id types.Hash) ([]string, error) {
 	args := []string{}
 	name := am.Name.String()
 
@@ -154,7 +196,7 @@ func (c *Container) appToNspawnArgs(am *schema.AppManifest, id types.Hash) ([]st
 		}
 	}
 
-	for _, mp := range am.MountPoints {
+	for _, mp := range am.App.MountPoints {
 		key := mp.Name
 		vol, ok := vols[key]
 		if !ok {

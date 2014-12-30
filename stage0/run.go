@@ -1,3 +1,5 @@
+//+build linux
+
 package stage0
 
 //
@@ -12,7 +14,7 @@ import (
 	"bytes"
 	"compress/bzip2"
 	"compress/gzip"
-	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,12 +24,13 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/appc/spec/aci"
+	"github.com/appc/spec/schema"
+	"github.com/appc/spec/schema/types"
 	"github.com/coreos/rocket/Godeps/_workspace/src/code.google.com/p/go-uuid/uuid"
-	"github.com/coreos/rocket/app-container/aci"
-	"github.com/coreos/rocket/app-container/schema"
-	"github.com/coreos/rocket/app-container/schema/types"
 	"github.com/coreos/rocket/cas"
 	rktpath "github.com/coreos/rocket/path"
+	"github.com/coreos/rocket/pkg/lock"
 	ptar "github.com/coreos/rocket/pkg/tar"
 	"github.com/coreos/rocket/version"
 
@@ -36,7 +39,8 @@ import (
 )
 
 const (
-	initPath = "stage1/init"
+	initPath  = "stage1/init"
+	envLockFd = "RKT_LOCK_FD"
 )
 
 type Config struct {
@@ -45,8 +49,9 @@ type Config struct {
 	Stage1Init    string     // binary to be execed as stage1
 	Stage1Rootfs  string     // compressed bundle containing a rootfs for stage1
 	Debug         bool
-	Images        []types.Hash      // application images
-	Volumes       map[string]string // map of volumes that rocket can provide to applications
+	// TODO(jonboulle): These images are partially-populated hashes, this should be clarified.
+	Images  []types.Hash      // application images
+	Volumes map[string]string // map of volumes that rocket can provide to applications
 }
 
 func init() {
@@ -71,6 +76,11 @@ func Setup(cfg Config) (string, error) {
 
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", fmt.Errorf("error creating directory: %v", err)
+	}
+
+	// Set up the container lock
+	if err := lockDir(dir); err != nil {
+		return "", err
 	}
 
 	log.Printf("Unpacking stage1 rootfs")
@@ -131,10 +141,10 @@ func Setup(cfg Config) (string, error) {
 		if cm.Apps.Get(am.Name) != nil {
 			return "", fmt.Errorf("error: multiple apps with name %s", am.Name)
 		}
-		a := schema.App{
+		a := schema.RuntimeApp{
 			Name:        am.Name,
 			ImageID:     img,
-			Isolators:   am.Isolators,
+			Isolators:   am.App.Isolators,
 			Annotations: am.Annotations,
 		}
 		cm.Apps = append(cm.Apps, a)
@@ -185,6 +195,19 @@ func Run(dir string, debug bool) {
 	if err := syscall.Exec(initPath, args, os.Environ()); err != nil {
 		log.Fatalf("error execing init: %v", err)
 	}
+}
+
+func lockDir(dir string) error {
+	l, err := lock.TryExclusiveLock(dir)
+	if err != nil {
+		return fmt.Errorf("error acquiring lock on dir %q: %v", dir, err)
+	}
+	// We need the fd number for stage1 and leave the file open / lock held til process exit
+	fd, err := l.Fd()
+	if err != nil {
+		panic(err)
+	}
+	return os.Setenv(envLockFd, fmt.Sprintf("%v", fd))
 }
 
 func untarRootfs(r io.Reader, dir string) error {
@@ -246,15 +269,16 @@ func unpackBuiltinRootfs(dir string) error {
 }
 
 // setupImage attempts to load the image by the given hash from the store,
-// verifies that the image matches the given hash and extracts the image
-// into a directory in the given dir.
-// It returns the AppManifest that the image contains
-func setupImage(cfg Config, img types.Hash, dir string) (*schema.AppManifest, error) {
+// verifies that the image matches the hash, and extracts the image into a
+// directory in the given dir.
+// It returns the ImageManifest that the image contains.
+// TODO(jonboulle): tighten up the Hash type here; currently it is partially-populated (i.e. half-length sha512)
+func setupImage(cfg Config, img types.Hash, dir string) (*schema.ImageManifest, error) {
 	log.Println("Loading image", img.String())
 
 	rs, err := cfg.Store.ReadStream(img.String())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error reading stream: %v", err)
 	}
 
 	ad := rktpath.AppImagePath(dir, img)
@@ -263,7 +287,7 @@ func setupImage(cfg Config, img types.Hash, dir string) (*schema.AppManifest, er
 		return nil, fmt.Errorf("error creating image directory: %v", err)
 	}
 
-	hash := sha256.New()
+	hash := sha512.New()
 	r := io.TeeReader(rs, hash)
 
 	if err := ptar.ExtractTar(tar.NewReader(r), ad); err != nil {
@@ -275,11 +299,12 @@ func setupImage(cfg Config, img types.Hash, dir string) (*schema.AppManifest, er
 		return nil, fmt.Errorf("error reading ACI: %v", err)
 	}
 
-	if id := fmt.Sprintf("%x", hash.Sum(nil)); id != img.Val {
+	// TODO(jonboulle): clean this up, leaky abstraction with the store.
+	if g := cas.HashToKey(hash); g != img.String() {
 		if err := os.RemoveAll(ad); err != nil {
 			fmt.Fprintf(os.Stderr, "error cleaning up directory: %v\n", err)
 		}
-		return nil, fmt.Errorf("image hash does not match expected (%v != %v)", id, img.Val)
+		return nil, fmt.Errorf("image hash does not match expected (%v != %v)", g, img.String())
 	}
 
 	err = os.MkdirAll(filepath.Join(ad, "rootfs/tmp"), 0777)
@@ -287,7 +312,7 @@ func setupImage(cfg Config, img types.Hash, dir string) (*schema.AppManifest, er
 		return nil, fmt.Errorf("error creating tmp directory: %v", err)
 	}
 
-	mpath := rktpath.AppManifestPath(dir, img)
+	mpath := rktpath.ImageManifestPath(dir, img)
 	f, err := os.Open(mpath)
 	if err != nil {
 		return nil, fmt.Errorf("error opening app manifest: %v", err)
@@ -296,7 +321,7 @@ func setupImage(cfg Config, img types.Hash, dir string) (*schema.AppManifest, er
 	if err != nil {
 		return nil, fmt.Errorf("error reading app manifest: %v", err)
 	}
-	var am schema.AppManifest
+	var am schema.ImageManifest
 	if err := json.Unmarshal(b, &am); err != nil {
 		return nil, fmt.Errorf("error unmarshaling app manifest: %v", err)
 	}
