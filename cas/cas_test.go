@@ -97,7 +97,7 @@ func TestDownloading(t *testing.T) {
 		body   []byte
 		hit    bool
 	}{
-		// The Blob entry isn't used
+	//	{ts.URL, "", "12", "96609004016e9625763c7153b74120c309c8cb1bd794345bf6fa2e60ac001cd7", nil}, body, false},
 		{ts.URL, "", body, false},
 		{ts.URL, "", body, true},
 	}
@@ -260,5 +260,19 @@ func TestGetImageManifest(t *testing.T) {
 	im, err = ds.GetImageManifest("sha512-aaaaaaaaaaaaaaaaa")
 	if err == nil {
 		t.Fatalf("expected non-nil error!")
+	}
+}
+
+func TestImageDownloadWrongAddress(t *testing.T) {
+	dir, err := ioutil.TempDir("", tstprefix)
+	if err != nil {
+		t.Fatalf("error creating tempdir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	ds := NewStore(dir)
+	rem := NewRemote("wrongEndpoint", "")
+	_, aciFile, _, err := rem.Download(*ds, nil)
+	if aciFile != nil && err == nil {
+		t.Fatalf("expected error when downloading an image")
 	}
 }
