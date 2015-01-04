@@ -1,3 +1,17 @@
+// Copyright 2014 CoreOS, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package main
 
 import (
@@ -90,12 +104,25 @@ func fetchImage(img string, ds *cas.Store, ks *keystore.Keystore, discover bool)
 	return fetchImageFromURL(u.String(), u.Scheme, ds, ks)
 }
 
+
 func fetchImageFromEndpoints(ep *discovery.Endpoints, ds *cas.Store, ks *keystore.Keystore) (string, error) {
-	return downloadImage(ep.ACIEndpoints[0].ACI, ep.ACIEndpoints[0].Sig, "", ds, ks)
+	rem := cas.NewRemote(ep.ACI[0], ep.Sig[0])
+	ds.ReadIndex(rem)
+	if rem.BlobKey == "" || (rem.CacheControl != nil && !rem.CacheControl.UseCachedImage()) {
+		return downloadImage(ep.ACIEndpoints[0].ACI, ep.ACIEndpoints[0].Sig, "", ds, ks)
+	}
+	fmt.Printf("rkt: using cached aci image\n")
+	return rem.BlobKey, nil
 }
 
 func fetchImageFromURL(imgurl string, scheme string, ds *cas.Store, ks *keystore.Keystore) (string, error) {
-	return downloadImage(imgurl, sigURLFromImgURL(imgurl), scheme, ds, ks)
+	rem := cas.NewRemote(imgurl, sigURLFromImgURL(imgurl))
+	ds.ReadIndex(rem)
+	if rem.BlobKey == "" || (rem.CacheControl != nil && !rem.CacheControl.UseCachedImage()) {
+		return downloadImage(imgurl, sigURLFromImgURL(imgurl), scheme, ds, ks)
+	}
+	fmt.Printf("rkt: using cached aci image\n")
+	return rem.BlobKey, nil
 }
 
 func downloadImage(aciURL string, sigURL string, scheme string, ds *cas.Store, ks *keystore.Keystore) (string, error) {
@@ -109,11 +136,17 @@ func downloadImage(aciURL string, sigURL string, scheme string, ds *cas.Store, k
 	if err != nil {
 		return "", err
 	}
+
 	if !ok {
 		rem = cas.NewRemote(aciURL, sigURL)
-		entity, aciFile, err := rem.Download(*ds, ks)
+		entity, aciFile, useCachedACI, err := rem.Download(*ds, ks)
 		if err != nil {
 			return "", err
+		}
+		// I added useCachedACI var to avoid one extra round trip with http requests
+		if useCachedACI {
+			fmt.Printf("rkt: using cached aci image\n")
+			return rem.BlobKey, nil
 		}
 		defer os.Remove(aciFile.Name())
 
@@ -128,6 +161,12 @@ func downloadImage(aciURL string, sigURL string, scheme string, ds *cas.Store, k
 			return "", err
 		}
 	}
+
+	rem, err = rem.Store(*ds, aciFile)
+	if err != nil {
+		return "", err
+	}
+
 	return rem.BlobKey, nil
 }
 
