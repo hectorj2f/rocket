@@ -119,7 +119,7 @@ func TestDownloading(t *testing.T) {
 			panic("expected a hit got a miss")
 		}
 		rem := NewRemote(tt.ACIURL, tt.SigURL)
-		_, aciFile, err := rem.Download(*ds, nil)
+		_, aciFile, _, err := rem.Download(*ds, nil)
 		if err != nil {
 			t.Fatalf("error downloading aci: %v", err)
 		}
@@ -269,7 +269,7 @@ func TestImageDownloadWrongAddress(t *testing.T) {
 		t.Fatalf("error creating tempdir: %v", err)
 	}
 	defer os.RemoveAll(dir)
-	ds := NewStore(dir)
+	ds, err := NewStore(dir)
 	rem := NewRemote("wrongEndpoint", "")
 	_, aciFile, _, err := rem.Download(*ds, nil)
 	if aciFile != nil && err == nil {

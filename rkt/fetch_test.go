@@ -237,8 +237,7 @@ func TestFetchImageCache(t *testing.T) {
 	defer ts.Close()
 
 	urlRemote, _ := url.Parse(fmt.Sprintf("%s/app.aci", ts.URL))
-	rem := cas.NewRemote(urlRemote.String(), sigURLFromImgURL(urlRemote.String()))
-	rem.BlobKey, err = downloadImage(rem, ds, ks)
+	rem.BlobKey, err = downloadImage(urlRemote.String(), sigURLFromImgURL(urlRemote.String()), rem, ds, ks)
 	if err != nil {
 		t.Fatalf("Error downloading image from: %v\n", err)
 	}
@@ -246,18 +245,12 @@ func TestFetchImageCache(t *testing.T) {
 		t.Errorf("expected remote to download an image")
 	}
 	// Recover Remote information for validation
-	err = ds.ReadIndex(rem)
+	rem, ok, err := ds.GetRemote(urlRemote.String())
 	if err != nil {
 		t.Fatalf("Error getting remote info: %v\n", err)
 	}
 	if rem.ETag != "123456789" {
 		t.Errorf("expected remote to have a ETag header argument")
-	}
-	if rem.CacheControl.NoStore {
-		t.Errorf("expected a no-store header argument to be false")
-	}
-	if rem.CacheControl.NoCache {
-		t.Errorf("expected a no-cache header argument to be false")
 	}
 	if rem.CacheControl.MaxAge != 10 {
 		t.Errorf("expected max-age header argument to be '10'")
@@ -265,7 +258,7 @@ func TestFetchImageCache(t *testing.T) {
 
 	// Test download of a cached image when using If-None-Match header
 	cachedBlobKey := rem.BlobKey
-	rem.BlobKey, err = downloadImage(rem, ds, ks)
+	rem.BlobKey, err = downloadImage(urlRemote.String(), sigURLFromImgURL(urlRemote.String()), rem, ds, ks)
 	if err != nil {
 		t.Fatalf("Error downloading image from %s: %v\n", ts.URL, err)
 	}
@@ -273,18 +266,12 @@ func TestFetchImageCache(t *testing.T) {
 		t.Errorf("expected remote to download an image")
 	}
 	// Recover Remote information for validation
-	err = ds.ReadIndex(rem)
+	rem, ok, err := ds.GetRemote(urlRemote.String())
 	if err != nil {
 		t.Fatalf("Error getting remote info: %v\n", err)
 	}
 	if rem.ETag != "123456789" {
 		t.Errorf("expected remote to have a ETag header argument")
-	}
-	if rem.CacheControl.NoStore {
-		t.Errorf("expected a no-store header argument to be false")
-	}
-	if rem.CacheControl.NoCache {
-		t.Errorf("expected a no-cache header argument to be false")
 	}
 	if rem.CacheControl.MaxAge != 10 {
 		t.Errorf("expected max-age header argument to be '10'")

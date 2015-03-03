@@ -12,21 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package cas implements a content-addressable-store on disk.
+// It leverages the `diskv` package to store items in a simple
+// key-value blob store: https://github.com/peterbourgon/diskv
 package cas
 
 import (
-	"encoding/json"
+	"database/sql"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/coreos/rocket/pkg/keystore"
 
-	"github.com/appc/spec/aci"
-	"github.com/appc/spec/schema/types"
+	"github.com/coreos/rocket/Godeps/_workspace/src/github.com/appc/docker2aci/lib"
+	"github.com/coreos/rocket/Godeps/_workspace/src/github.com/appc/spec/aci"
+
 	"github.com/coreos/rocket/Godeps/_workspace/src/github.com/mitchellh/ioprogress"
 	"github.com/coreos/rocket/Godeps/_workspace/src/golang.org/x/crypto/openpgp"
 )
@@ -42,50 +48,50 @@ func NewRemote(aciurl, sigurl string) *Remote {
 type Remote struct {
 	ACIURL string
 	SigURL string
-	ETag   string
+	ETag string
 	// The key in the blob store under which the ACI has been saved.
-	BlobKey      string
+	BlobKey string
 	CacheControl *CacheControl
 }
 
-func (r Remote) Marshal() []byte {
-	m, _ := json.Marshal(r)
-	return m
-}
-func (r *Remote) Unmarshal(data []byte) {
-	err := json.Unmarshal(data, r)
-	if err != nil {
-		panic(err)
-	}
-}
-func (r Remote) Hash() string {
-	return types.NewHashSHA512([]byte(r.ACIURL)).String()
-}
-func (r Remote) Type() int64 {
-	return remoteType
-}
-
-// Download downloads and verifies the remote ACI.
-// If Keystore is nil signature verification will be skipped.
-// bool will be True if the cached aci can be still used.
-// bool will be False if there is not any cached aci or there is a newest version of it.
-// Download returns the signer, an *os.File representing the ACI, and an error if any.
-// err will be nil if the ACI downloads successfully and the ACI is verified.
 func (r Remote) Download(ds Store, ks *keystore.Keystore) (*openpgp.Entity, *os.File, bool, error) {
 	var entity *openpgp.Entity
-	var err error
-	acif, useCachedACI, err := downloadACI(ds, r)
+	u, err := url.Parse(r.ACIURL)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("error parsing ACI url: %v", err)
+	}
+	if u.Scheme == "docker" {
+		registryURL := strings.TrimPrefix(r.ACIURL, "docker://")
 
+		tmpDir, err := ds.tmpDir()
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("error creating temporary dir for docker to ACI conversion: %v", err)
+		}
+
+		acis, err := docker2aci.Convert(registryURL, true, tmpDir)
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("error converting docker image to ACI: %v", err)
+		}
+
+		aciFile, err := os.Open(acis[0])
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("error opening squashed ACI file: %v", err)
+		}
+
+		return nil, aciFile, false, nil
+	}
+
+	acif, useCachedACI, err := downloadACI(ds, r.ACIURL, r)
 	if err != nil {
 		return nil, acif, useCachedACI, fmt.Errorf("error downloading the aci image: %v", err)
 	}
-
 	if useCachedACI {
 		return nil, nil, useCachedACI, nil
 	}
 
 	if ks != nil {
-		sigTempFile, err := downloadSignatureFile(r.SigURL)
+		fmt.Printf("Downloading signature from %v\n", r.SigURL)
+		sigTempFile, useCachedACI, err := downloadSignatureFile(ds, r.SigURL, r)
 		if err != nil {
 			return nil, acif, useCachedACI, fmt.Errorf("error downloading the signature file: %v", err)
 		}
@@ -121,18 +127,45 @@ func (r Remote) Store(ds Store, aci io.Reader) (*Remote, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Recover the remote stored information in downloadACI
-	ds.ReadIndex(&r)
-
 	r.BlobKey = key
-	ds.WriteIndex(&r)
+	err = ds.WriteRemote(&r)
+	if err != nil {
+		return nil, err
+	}
 	return &r, nil
 }
 
-func downloadACI(ds Store, r Remote) (*os.File, bool, error) {
+// downloadACI gets the aci specified at aciurl
+func downloadACI(ds Store, aciurl string, r Remote) (*os.File, bool, error) {
+	return downloadHTTP(aciurl, "ACI", ds.tmpFile, r, ds)
+}
+
+// downloadSignatureFile gets the signature specified at sigurl
+func downloadSignatureFile(ds Store, sigurl string, r Remote) (*os.File, bool, error) {
+	getTemp := func() (*os.File, error) {
+		return ioutil.TempFile("", "")
+	}
+	return downloadHTTP(sigurl, "signature", getTemp, r, ds)
+}
+
+
+// downloadHTTP retrieves url, creating a temp file using getTempFile
+// file:// http:// and https:// urls supported
+func downloadHTTP(url, label string, getTempFile func() (*os.File, error), r Remote, ds Store) (*os.File, bool, error) {
 	var useCachedACI = false
+	tmp, err := getTempFile()
+	if err != nil {
+		return nil, useCachedACI, fmt.Errorf("error downloading %s: %v", label, err)
+	}
+	defer func() {
+		if err != nil {
+			os.Remove(tmp.Name())
+			tmp.Close()
+		}
+	}()
+
 	client := &http.Client{}
-	req, err := http.NewRequest("GET", r.ACIURL, nil)
+	req, err := http.NewRequest("GET", url, nil)
 	if r.ETag != "" {
 		req.Header.Add("If-None-Match", r.ETag)
 	}
@@ -142,7 +175,7 @@ func downloadACI(ds Store, r Remote) (*os.File, bool, error) {
 	}
 	defer res.Body.Close()
 
-	prefix := "Downloading aci"
+	prefix := "Downloading " + label
 	fmtBytesSize := 18
 	barSize := int64(80 - len(prefix) - fmtBytesSize)
 	bar := ioprogress.DrawTextFormatBar(barSize)
@@ -155,73 +188,82 @@ func downloadACI(ds Store, r Remote) (*os.File, bool, error) {
 		)
 	}
 
+	reader := &ioprogress.Reader{
+		Reader:       res.Body,
+		Size:         res.ContentLength,
+		DrawFunc:     ioprogress.DrawTerminalf(os.Stdout, fmtfunc),
+		DrawInterval: time.Second,
+	}
+
 	// TODO(jonboulle): handle http more robustly (redirects?)
 	if res.StatusCode == http.StatusNotModified || res.StatusCode == http.StatusOK {
-		r.ETag = res.Header.Get("ETag")
-		r.CacheControl = NewCache(res.Header.Get("Cache-Control"))
-		ds.WriteIndex(&r)
 
-		useCachedACI = (res.StatusCode == http.StatusNotModified)
-		if useCachedACI {
-			return nil, useCachedACI, nil
+		if label != "signature" {
+			r.ETag = res.Header.Get("ETag")
+			r.CacheControl = NewCache(res.Header.Get("Cache-Control"))
+			if err = ds.WriteRemote(&r); err != nil {
+				return nil, useCachedACI, err
+			}
+			useCachedACI = (res.StatusCode == http.StatusNotModified)
+			if useCachedACI {
+				return nil, useCachedACI, nil
+			}
 		}
 
-		reader := &ioprogress.Reader{
-			Reader:       res.Body,
-			Size:         res.ContentLength,
-			DrawFunc:     ioprogress.DrawTerminalf(os.Stdout, fmtfunc),
-			DrawInterval: time.Second,
+		if _, err := io.Copy(tmp, reader); err != nil {
+			return nil, useCachedACI, fmt.Errorf("error copying %s: %v", label, err)
 		}
 
-		aciTempFile, err := ds.tmpFile()
-		if err != nil {
-			return nil, useCachedACI, fmt.Errorf("error downloading aci: %v", err)
+		if err := tmp.Sync(); err != nil {
+			return nil, useCachedACI, fmt.Errorf("error writing %s: %v", label, err)
 		}
-
-		if _, err := io.Copy(aciTempFile, reader); err != nil {
-			aciTempFile.Close()
-			os.Remove(aciTempFile.Name())
-			return nil, useCachedACI, fmt.Errorf("error copying temp aci: %v", err)
-		}
-		if err := aciTempFile.Sync(); err != nil {
-			aciTempFile.Close()
-			os.Remove(aciTempFile.Name())
-			return nil, useCachedACI, fmt.Errorf("error writing temp aci: %v", err)
-		}
-
-		return aciTempFile, useCachedACI, nil
-
 	} else {
-		return nil, useCachedACI, fmt.Errorf("bad HTTP status code %d with message: %s \n", res.StatusCode, http.StatusText(res.StatusCode))
+		return nil, useCachedACI, fmt.Errorf("bad HTTP status code: %d", res.StatusCode)
 	}
 
+	return tmp, useCachedACI, nil
 }
 
-func downloadSignatureFile(sigurl string) (*os.File, error) {
-	sig, err := ioutil.TempFile("", "")
+// GetRemote tries to retrieve a remote with the given aciURL. found will be
+// false if remote doesn't exist.
+func GetRemote(tx *sql.Tx, aciURL string) (remote *Remote, found bool, err error) {
+	remote = &Remote{}
+	rows, err := tx.Query("SELECT sigurl, etag, blobkey, maxage, downloaded FROM remote WHERE aciurl == $1", aciURL)
 	if err != nil {
-		return nil, fmt.Errorf("error downloading signature: %v", err)
+		return nil, false, err
 	}
-	res, err := http.Get(sigurl)
+	for rows.Next() {
+		found = true
+		cc := &CacheControl{}
+		if err := rows.Scan(&remote.SigURL, &remote.ETag, &remote.BlobKey, &cc.MaxAge, &cc.Downloaded); err != nil {
+			return nil, false, err
+		}
+		remote.CacheControl = cc
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+
+	return remote, found, err
+}
+
+// WriteRemote adds or updates the provided Remote.
+func WriteRemote(tx *sql.Tx, remote *Remote) error {
+	// ql doesn't have an INSERT OR UPDATE function so
+	// it's faster to remove and reinsert the row
+	_, err := tx.Exec("DELETE FROM remote WHERE aciurl == $1", remote.ACIURL)
 	if err != nil {
-		return nil, fmt.Errorf("error downloading signature: %v", err)
+		return err
 	}
-	defer res.Body.Close()
-
-	// TODO(jonboulle): handle http more robustly (redirects?)
-	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("bad HTTP status code: %d", res.StatusCode)
+	_, err = tx.Exec("INSERT INTO remote VALUES ($1, $2, $3, $4, $5, $6)",
+									 remote.ACIURL,
+									 remote.SigURL,
+									 remote.ETag,
+									 remote.BlobKey,
+									 remote.CacheControl.MaxAge,
+									 remote.CacheControl.Downloaded)
+	if err != nil {
+		return err
 	}
-
-	if _, err := io.Copy(sig, res.Body); err != nil {
-		sig.Close()
-		os.Remove(sig.Name())
-		return nil, fmt.Errorf("error copying signature: %v", err)
-	}
-	if err := sig.Sync(); err != nil {
-		sig.Close()
-		os.Remove(sig.Name())
-		return nil, fmt.Errorf("error writing signature: %v", err)
-	}
-	return sig, nil
+	return nil
 }

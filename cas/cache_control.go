@@ -7,22 +7,16 @@ import (
 )
 
 type CacheControl struct {
-	// MaxAge<0 means don't use cached image, equivalently 'Max-Age: 0'
+	// MaxAge<=0 means don't use cached image, equivalently 'Max-Age: 0'
 	// MaxAge>0 means Max-Age attribute present and given in seconds
-	// MaxAge=0 means no 'Max-Age' attribute specified.
 	MaxAge    int
-	NoStore   bool
-	NoCache   bool
-	Freshness time.Time
+	Downloaded time.Time
 }
 
 func NewCache(headerValue string) *CacheControl {
 	cc := &CacheControl{}
-
-	cc.Freshness = time.Now()
-	cc.NoStore = false
-	cc.NoCache = false
-	cc.MaxAge = -1
+	cc.Downloaded = time.Now()
+	cc.MaxAge = 0
 
 	if len(headerValue) > 0 {
 		parts := strings.Split(headerValue, " ")
@@ -35,10 +29,10 @@ func NewCache(headerValue string) *CacheControl {
 
 			switch lowerAttr {
 			case "no-store":
-				cc.NoStore = true
+				cc.MaxAge = 0
 				continue
 			case "no-cache":
-				cc.NoCache = true
+				cc.MaxAge = 0
 				continue
 			case "max-age":
 				secs, err := strconv.Atoi(val)
@@ -46,8 +40,7 @@ func NewCache(headerValue string) *CacheControl {
 					break
 				}
 				if secs <= 0 {
-					cc.MaxAge = -1
-					cc.NoCache = true
+					cc.MaxAge = 0
 				} else {
 					cc.MaxAge = secs
 				}
@@ -61,8 +54,8 @@ func NewCache(headerValue string) *CacheControl {
 func (cc CacheControl) UseCachedImage() bool {
 	// Return True if a valid image exists in the cache, otherwise
 	// return False.
-	freshnessLifetime := int(time.Now().Sub(cc.Freshness).Seconds())
-	if (cc.MaxAge > -1 && freshnessLifetime < cc.MaxAge) && !cc.NoStore && !cc.NoCache {
+	freshnessLifetime := int(time.Now().Sub(cc.Downloaded).Seconds())
+	if (cc.MaxAge > 0 && freshnessLifetime < cc.MaxAge) {
 		return true
 	}
 

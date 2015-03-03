@@ -104,25 +104,12 @@ func fetchImage(img string, ds *cas.Store, ks *keystore.Keystore, discover bool)
 	return fetchImageFromURL(u.String(), u.Scheme, ds, ks)
 }
 
-
 func fetchImageFromEndpoints(ep *discovery.Endpoints, ds *cas.Store, ks *keystore.Keystore) (string, error) {
-	rem := cas.NewRemote(ep.ACI[0], ep.Sig[0])
-	ds.ReadIndex(rem)
-	if rem.BlobKey == "" || (rem.CacheControl != nil && !rem.CacheControl.UseCachedImage()) {
-		return downloadImage(ep.ACIEndpoints[0].ACI, ep.ACIEndpoints[0].Sig, "", ds, ks)
-	}
-	fmt.Printf("rkt: using cached aci image\n")
-	return rem.BlobKey, nil
+	return downloadImage(ep.ACIEndpoints[0].ACI, ep.ACIEndpoints[0].Sig, "", ds, ks)
 }
 
 func fetchImageFromURL(imgurl string, scheme string, ds *cas.Store, ks *keystore.Keystore) (string, error) {
-	rem := cas.NewRemote(imgurl, sigURLFromImgURL(imgurl))
-	ds.ReadIndex(rem)
-	if rem.BlobKey == "" || (rem.CacheControl != nil && !rem.CacheControl.UseCachedImage()) {
-		return downloadImage(imgurl, sigURLFromImgURL(imgurl), scheme, ds, ks)
-	}
-	fmt.Printf("rkt: using cached aci image\n")
-	return rem.BlobKey, nil
+	return downloadImage(imgurl, sigURLFromImgURL(imgurl), scheme, ds, ks)
 }
 
 func downloadImage(aciURL string, sigURL string, scheme string, ds *cas.Store, ks *keystore.Keystore) (string, error) {
@@ -137,7 +124,7 @@ func downloadImage(aciURL string, sigURL string, scheme string, ds *cas.Store, k
 		return "", err
 	}
 
-	if !ok {
+	if !ok || (rem.CacheControl != nil && !rem.CacheControl.UseCachedImage()) {
 		rem = cas.NewRemote(aciURL, sigURL)
 		entity, aciFile, useCachedACI, err := rem.Download(*ds, ks)
 		if err != nil {
@@ -156,15 +143,13 @@ func downloadImage(aciURL string, sigURL string, scheme string, ds *cas.Store, k
 				stdout("  %s", v.Name)
 			}
 		}
+
 		rem, err = rem.Store(*ds, aciFile)
 		if err != nil {
 			return "", err
 		}
-	}
-
-	rem, err = rem.Store(*ds, aciFile)
-	if err != nil {
-		return "", err
+	} else {
+		fmt.Printf("rkt: using cached aci image\n")
 	}
 
 	return rem.BlobKey, nil
