@@ -48,9 +48,9 @@ func NewRemote(aciurl, sigurl string) *Remote {
 type Remote struct {
 	ACIURL string
 	SigURL string
-	ETag string
+	ETag   string
 	// The key in the blob store under which the ACI has been saved.
-	BlobKey string
+	BlobKey      string
 	CacheControl *CacheControl
 }
 
@@ -81,7 +81,7 @@ func (r Remote) Download(ds Store, ks *keystore.Keystore) (*openpgp.Entity, *os.
 		return nil, aciFile, false, nil
 	}
 
-	acif, useCachedACI, err := downloadACI(ds, r.ACIURL, r)
+	acif, useCachedACI, err := downloadACI(ds, r)
 	if err != nil {
 		return nil, acif, useCachedACI, fmt.Errorf("error downloading the aci image: %v", err)
 	}
@@ -91,7 +91,7 @@ func (r Remote) Download(ds Store, ks *keystore.Keystore) (*openpgp.Entity, *os.
 
 	if ks != nil {
 		fmt.Printf("Downloading signature from %v\n", r.SigURL)
-		sigTempFile, useCachedACI, err := downloadSignatureFile(ds, r.SigURL, r)
+		sigTempFile, err := downloadSignatureFile(ds, r.SigURL, r)
 		if err != nil {
 			return nil, acif, useCachedACI, fmt.Errorf("error downloading the signature file: %v", err)
 		}
@@ -127,6 +127,11 @@ func (r Remote) Store(ds Store, aci io.Reader) (*Remote, error) {
 	if err != nil {
 		return nil, err
 	}
+	r, _, err = ds.GetRemote(r.ACIURL)
+	if err != nil {
+		return nil, err
+	}
+
 	r.BlobKey = key
 	err = ds.WriteRemote(&r)
 	if err != nil {
@@ -136,26 +141,14 @@ func (r Remote) Store(ds Store, aci io.Reader) (*Remote, error) {
 }
 
 // downloadACI gets the aci specified at aciurl
-func downloadACI(ds Store, aciurl string, r Remote) (*os.File, bool, error) {
-	return downloadHTTP(aciurl, "ACI", ds.tmpFile, r, ds)
-}
-
-// downloadSignatureFile gets the signature specified at sigurl
-func downloadSignatureFile(ds Store, sigurl string, r Remote) (*os.File, bool, error) {
-	getTemp := func() (*os.File, error) {
-		return ioutil.TempFile("", "")
-	}
-	return downloadHTTP(sigurl, "signature", getTemp, r, ds)
-}
-
-
-// downloadHTTP retrieves url, creating a temp file using getTempFile
-// file:// http:// and https:// urls supported
-func downloadHTTP(url, label string, getTempFile func() (*os.File, error), r Remote, ds Store) (*os.File, bool, error) {
-	var useCachedACI = false
-	tmp, err := getTempFile()
+func downloadACI(ds Store, r Remote) (*os.File, bool, error) {
+	var (
+		useCachedACI = false
+		aciurl       = r.ACIURL
+	)
+	tmp, err := ds.tmpFile()
 	if err != nil {
-		return nil, useCachedACI, fmt.Errorf("error downloading %s: %v", label, err)
+		return nil, useCachedACI, fmt.Errorf("error downloading ACI: %v", err)
 	}
 	defer func() {
 		if err != nil {
@@ -165,7 +158,7 @@ func downloadHTTP(url, label string, getTempFile func() (*os.File, error), r Rem
 	}()
 
 	client := &http.Client{}
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", aciurl, nil)
 	if r.ETag != "" {
 		req.Header.Add("If-None-Match", r.ETag)
 	}
@@ -175,7 +168,7 @@ func downloadHTTP(url, label string, getTempFile func() (*os.File, error), r Rem
 	}
 	defer res.Body.Close()
 
-	prefix := "Downloading " + label
+	prefix := "Downloading ACI"
 	fmtBytesSize := 18
 	barSize := int64(80 - len(prefix) - fmtBytesSize)
 	bar := ioprogress.DrawTextFormatBar(barSize)
@@ -197,31 +190,85 @@ func downloadHTTP(url, label string, getTempFile func() (*os.File, error), r Rem
 
 	// TODO(jonboulle): handle http more robustly (redirects?)
 	if res.StatusCode == http.StatusNotModified || res.StatusCode == http.StatusOK {
+		r.ETag = res.Header.Get("ETag")
+		r.CacheControl = NewCache(res.Header.Get("Cache-Control"))
 
-		if label != "signature" {
-			r.ETag = res.Header.Get("ETag")
-			r.CacheControl = NewCache(res.Header.Get("Cache-Control"))
-			if err = ds.WriteRemote(&r); err != nil {
-				return nil, useCachedACI, err
-			}
-			useCachedACI = (res.StatusCode == http.StatusNotModified)
-			if useCachedACI {
-				return nil, useCachedACI, nil
-			}
+		useCachedACI = (res.StatusCode == http.StatusNotModified)
+		if useCachedACI {
+			return nil, useCachedACI, nil
 		}
 
 		if _, err := io.Copy(tmp, reader); err != nil {
-			return nil, useCachedACI, fmt.Errorf("error copying %s: %v", label, err)
+			return nil, useCachedACI, fmt.Errorf("error copying ACI: %v", err)
 		}
 
 		if err := tmp.Sync(); err != nil {
-			return nil, useCachedACI, fmt.Errorf("error writing %s: %v", label, err)
+			return nil, useCachedACI, fmt.Errorf("error writing ACI: %v", err)
 		}
 	} else {
 		return nil, useCachedACI, fmt.Errorf("bad HTTP status code: %d", res.StatusCode)
 	}
 
+	if err = ds.WriteRemote(&r); err != nil {
+		return nil, useCachedACI, err
+	}
+
 	return tmp, useCachedACI, nil
+}
+
+// downloadSignatureFile gets the signature specified at sigurl
+func downloadSignatureFile(ds Store, sigurl string, r Remote) (*os.File, error) {
+	tmp, err := ioutil.TempFile("", "")
+	if err != nil {
+		return nil, fmt.Errorf("error downloading signature: %v", err)
+	}
+	defer func() {
+		if err != nil {
+			os.Remove(tmp.Name())
+			tmp.Close()
+		}
+	}()
+
+	res, err := http.Get(sigurl)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	prefix := "Downloading signature"
+	fmtBytesSize := 18
+	barSize := int64(80 - len(prefix) - fmtBytesSize)
+	bar := ioprogress.DrawTextFormatBar(barSize)
+	fmtfunc := func(progress, total int64) string {
+		return fmt.Sprintf(
+			"%s: %s %s",
+			prefix,
+			bar(progress, total),
+			ioprogress.DrawTextFormatBytes(progress, total),
+		)
+	}
+
+	reader := &ioprogress.Reader{
+		Reader:       res.Body,
+		Size:         res.ContentLength,
+		DrawFunc:     ioprogress.DrawTerminalf(os.Stdout, fmtfunc),
+		DrawInterval: time.Second,
+	}
+
+	// TODO(jonboulle): handle http more robustly (redirects?)
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("bad HTTP status code: %d", res.StatusCode)
+	}
+
+	if _, err := io.Copy(tmp, reader); err != nil {
+		return nil, fmt.Errorf("error copying signature: %v", err)
+	}
+
+	if err := tmp.Sync(); err != nil {
+		return nil, fmt.Errorf("error writing signature: %v", err)
+	}
+
+	return tmp, nil
 }
 
 // GetRemote tries to retrieve a remote with the given aciURL. found will be
@@ -255,13 +302,16 @@ func WriteRemote(tx *sql.Tx, remote *Remote) error {
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec("INSERT INTO remote VALUES ($1, $2, $3, $4, $5, $6)",
-									 remote.ACIURL,
-									 remote.SigURL,
-									 remote.ETag,
-									 remote.BlobKey,
-									 remote.CacheControl.MaxAge,
-									 remote.CacheControl.Downloaded)
+
+	if remote.CacheControl != nil {
+		_, err = tx.Exec("INSERT INTO remote VALUES ($1, $2, $3, $4, $5, $6)",
+			remote.ACIURL,
+			remote.SigURL,
+			remote.ETag,
+			remote.BlobKey,
+			remote.CacheControl.MaxAge,
+			remote.CacheControl.Downloaded)
+	}
 	if err != nil {
 		return err
 	}

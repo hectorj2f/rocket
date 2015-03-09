@@ -184,7 +184,10 @@ func TestFetchImageCache(t *testing.T) {
 		t.Fatalf("error creating tempdir: %v", err)
 	}
 	defer os.RemoveAll(dir)
-	ds := cas.NewStore(dir)
+	ds, err := cas.NewStore(dir)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
 	defer ds.Dump(false)
 
 	ks, ksPath, err := keystore.NewTestKeystore()
@@ -197,36 +200,36 @@ func TestFetchImageCache(t *testing.T) {
 	if _, err := ks.StoreTrustedKeyPrefix("example.com/app", bytes.NewBufferString(key.ArmoredPublicKey)); err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
-	aci, err := util.NewACI("example.com/app")
+	a, err := aci.NewBasicACI(dir, "example.com/app")
+	defer a.Close()
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
 
 	// Rewind the ACI
-	if _, err := aci.Seek(0, 0); err != nil {
+	if _, err := a.Seek(0, 0); err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
 
-	sig, err := util.NewDetachedSignature(key.ArmoredPrivateKey, aci)
+	sig, err := aci.NewDetachedSignature(key.ArmoredPrivateKey, a)
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
 
 	// Rewind the ACI.
-	if _, err := aci.Seek(0, 0); err != nil {
+	if _, err := a.Seek(0, 0); err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=10")
-		w.Header().Set("ETag", "123456789")
-
 		switch filepath.Ext(r.URL.Path) {
 		case ".aci":
+			w.Header().Set("Cache-Control", "max-age=10")
+			w.Header().Set("ETag", "123456789")
 			if cc := r.Header.Get("If-None-Match"); cc == "123456789" {
 				w.WriteHeader(StatusNotModified)
 			} else {
-				io.Copy(w, aci)
+				io.Copy(w, a)
 			}
 			return
 		case ".sig":
@@ -237,15 +240,15 @@ func TestFetchImageCache(t *testing.T) {
 	defer ts.Close()
 
 	urlRemote, _ := url.Parse(fmt.Sprintf("%s/app.aci", ts.URL))
-	rem.BlobKey, err = downloadImage(urlRemote.String(), sigURLFromImgURL(urlRemote.String()), rem, ds, ks)
+	blobKey, err := downloadImage(urlRemote.String(), sigURLFromImgURL(urlRemote.String()), "", ds, ks)
 	if err != nil {
 		t.Fatalf("Error downloading image from: %v\n", err)
 	}
-	if rem.BlobKey == "" {
+	if blobKey == "" {
 		t.Errorf("expected remote to download an image")
 	}
 	// Recover Remote information for validation
-	rem, ok, err := ds.GetRemote(urlRemote.String())
+	rem, _, err := ds.GetRemote(urlRemote.String())
 	if err != nil {
 		t.Fatalf("Error getting remote info: %v\n", err)
 	}
@@ -258,7 +261,7 @@ func TestFetchImageCache(t *testing.T) {
 
 	// Test download of a cached image when using If-None-Match header
 	cachedBlobKey := rem.BlobKey
-	rem.BlobKey, err = downloadImage(urlRemote.String(), sigURLFromImgURL(urlRemote.String()), rem, ds, ks)
+	rem.BlobKey, err = downloadImage(urlRemote.String(), sigURLFromImgURL(urlRemote.String()), "", ds, ks)
 	if err != nil {
 		t.Fatalf("Error downloading image from %s: %v\n", ts.URL, err)
 	}
@@ -266,7 +269,7 @@ func TestFetchImageCache(t *testing.T) {
 		t.Errorf("expected remote to download an image")
 	}
 	// Recover Remote information for validation
-	rem, ok, err := ds.GetRemote(urlRemote.String())
+	rem, _, err = ds.GetRemote(urlRemote.String())
 	if err != nil {
 		t.Fatalf("Error getting remote info: %v\n", err)
 	}

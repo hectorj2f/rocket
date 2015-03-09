@@ -97,7 +97,6 @@ func TestDownloading(t *testing.T) {
 		body   []byte
 		hit    bool
 	}{
-	//	{ts.URL, "", "12", "96609004016e9625763c7153b74120c309c8cb1bd794345bf6fa2e60ac001cd7", nil}, body, false},
 		{ts.URL, "", body, false},
 		{ts.URL, "", body, true},
 	}

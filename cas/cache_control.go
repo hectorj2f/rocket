@@ -9,7 +9,7 @@ import (
 type CacheControl struct {
 	// MaxAge<=0 means don't use cached image, equivalently 'Max-Age: 0'
 	// MaxAge>0 means Max-Age attribute present and given in seconds
-	MaxAge    int
+	MaxAge     int
 	Downloaded time.Time
 }
 
@@ -55,7 +55,7 @@ func (cc CacheControl) UseCachedImage() bool {
 	// Return True if a valid image exists in the cache, otherwise
 	// return False.
 	freshnessLifetime := int(time.Now().Sub(cc.Downloaded).Seconds())
-	if (cc.MaxAge > 0 && freshnessLifetime < cc.MaxAge) {
+	if cc.MaxAge > 0 && freshnessLifetime < cc.MaxAge {
 		return true
 	}
 
