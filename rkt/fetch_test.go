@@ -199,7 +199,6 @@ func TestDownloading(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
-		rem := cas.NewRemote(tt.ACIURL, tt.SigURL)
 		rem.BlobKey = key
 		err = ds.WriteRemote(rem)
 		if err != nil {
